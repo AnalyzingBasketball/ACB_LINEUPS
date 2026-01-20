@@ -5,7 +5,7 @@ from google.cloud import bigquery
 import os
 
 # --- CONFIGURACIÓN (Pon tus datos aquí) ---
-PROJECT_ID = 'tfm-acb-scouting'  # <--- TU ID DE PROYECTO
+PROJECT_ID = 'acb-lineups'  # <--- TU ID DE PROYECTO
 DATASET_ID = 'acb_data'
 CREDENTIALS_FILE = 'acb-credentials.json' # El archivo que tienes en la carpeta
 
