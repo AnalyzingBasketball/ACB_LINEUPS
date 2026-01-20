@@ -8,7 +8,7 @@ from google.cloud import bigquery
 import pandas_gbq
 
 # ==============================================================================
-# 1. CONFIGURACIÓN
+# 1. CONFIGURACIÓN Y CREDENCIALES
 # ==============================================================================
 st.set_page_config(page_title="ACB Smart Scout", page_icon="🏀", layout="wide")
 
@@ -18,25 +18,38 @@ PROJECT_ID = "acb-lineups"
 DATASET_ID = "acb_data"
 API_KEY = '0dd94928-6f57-4c08-a3bd-b1b2f092976e'
 
+# --- CABECERAS ANTI-BLOQUEO (CRÍTICO) ---
 HEADERS_API = {
-    'x-apikey': API_KEY, 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://live.acb.com/'
+    'x-apikey': API_KEY, 
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 
+    'Referer': 'https://live.acb.com/',
+    'Origin': 'https://live.acb.com',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+    'Connection': 'keep-alive'
 }
-HEADERS_WEB = {'User-Agent': 'Mozilla/5.0'}
+HEADERS_WEB = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
 
 # --- CONEXIÓN CLOUD ---
 @st.cache_resource
 def get_client():
     if "gcp_service_account" in st.secrets:
-        creds = service_account.Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"]
-        )
-        return bigquery.Client(credentials=creds, project=PROJECT_ID), creds
+        try:
+            creds = service_account.Credentials.from_service_account_info(
+                st.secrets["gcp_service_account"]
+            )
+            return bigquery.Client(credentials=creds, project=PROJECT_ID), creds
+        except Exception as e:
+            st.error(f"❌ Error Credenciales: {e}")
+            return None, None
     return None, None
 
 client, credentials = get_client()
 
 # ==============================================================================
-# 2. FUNCIONES DE LÓGICA
+# 2. FUNCIONES DE LÓGICA (SCANNER + PROCESADOR)
 # ==============================================================================
 
 def get_existing_games_in_bq():
@@ -51,19 +64,18 @@ def get_existing_games_in_bq():
 def get_played_games_on_web():
     """Escanea ACB.com rápido."""
     found_games = []
-    # Escaneamos hasta la jornada 20 (para ir rápido, puedes subirlo a 40)
-    # Liga (1) y Copa (2)
+    # Escaneamos hasta la jornada 40 por si acaso
     urls_to_scan = []
-    for j in range(1, 35):
+    for j in range(1, 40):
+        # LIGA ENDESA (ID 1)
         urls_to_scan.append((f"https://www.acb.com/resultados-clasificacion/ver/temporada_id/{CURRENT_SEASON}/competicion_id/1/jornada_numero/{j}", str(j)))
-        # urls_to_scan.append((f"https://www.acb.com/resultados-clasificacion/ver/temporada_id/{CURRENT_SEASON}/competicion_id/2/jornada_numero/{j}", str(j)))
     
     status = st.empty()
     bar = st.progress(0)
     
     for i, (url, week) in enumerate(urls_to_scan):
         if i % 5 == 0: 
-            status.text(f"📡 Escaneando Jornada {week}...")
+            status.text(f"📡 Escaneando Jornada {week} en la web de ACB...")
             bar.progress((i+1)/len(urls_to_scan))
         try:
             r = requests.get(url, headers=HEADERS_WEB, timeout=2)
@@ -80,7 +92,11 @@ def process_single_game(gid, season, week):
     url = "https://api2.acb.com/api/matchdata/PlayByPlay/play-by-play"
     try:
         r = requests.get(url, params={'matchId': gid}, headers=HEADERS_API, timeout=5)
-        if r.status_code != 200: return []
+        
+        # --- DEBUG: SI FALLA, AVISAR ---
+        if r.status_code != 200:
+            st.write(f"⚠️ Aviso: Partido {gid} devolvió código {r.status_code}")
+            return []
         
         data = r.json()
         raw_events = []
@@ -89,6 +105,8 @@ def process_single_game(gid, season, week):
             for k,v in data.items(): 
                 if isinstance(v, list): raw_events.extend(v)
         
+        if not raw_events: return []
+
         # Ordenar cronológicamente
         def sort_key(e):
             t = e.get('cronometer', "00:00")
@@ -138,7 +156,9 @@ def process_single_game(gid, season, week):
                 'H_IDs': tuple([x[1] for x in h_list]), 'A_IDs': tuple([x[1] for x in a_list])
             })
         return processed_rows
-    except: return []
+    except Exception as e: 
+        st.write(f"Error procesando {gid}: {e}")
+        return []
 
 def calculate_stats_from_rows(rows):
     """Calcula estadísticas de una lista de eventos procesados."""
@@ -204,19 +224,20 @@ def calculate_stats_from_rows(rows):
     return final_data
 
 # ==============================================================================
-# 3. INTERFAZ
+# 3. INTERFAZ: VISOR + SINCRONIZADOR
 # ==============================================================================
 
 st.title(f"🏀 Super Scout ACB {CURRENT_SEASON}")
 
-with st.expander("🔄 SINCRONIZAR DATOS", expanded=True):
+# --- BOTÓN DE SINCRONIZACIÓN (Incremental) ---
+with st.expander("🔄 SINCRONIZAR DATOS (Click aquí)", expanded=True):
     if st.button("BUSCAR Y ACTUALIZAR", type="primary"):
         status_box = st.container()
         
         with status_box:
             # 1. Comprobar existentes
             existing = get_existing_games_in_bq()
-            st.info(f"💾 Partidos ya en Nube: {len(existing)}")
+            st.info(f"💾 Partidos ya en BigQuery: {len(existing)}")
             
             # 2. Comprobar Web
             df_web = get_played_games_on_web()
@@ -229,12 +250,11 @@ with st.expander("🔄 SINCRONIZAR DATOS", expanded=True):
                 if not missing:
                     st.success("✅ Todo actualizado.")
                 else:
-                    st.warning(f"⚡ Faltan {len(missing)} partidos. Descargando por lotes...")
+                    st.warning(f"⚡ Faltan {len(missing)} partidos. Descargando por lotes de 10...")
                     
                     # --- PROCESO POR LOTES (BATCHING) ---
-                    # Esto evita que se pete la memoria
                     missing_list = df_web[df_web['id'].isin(missing)].to_dict('records')
-                    BATCH_SIZE = 10 # Procesamos de 10 en 10
+                    BATCH_SIZE = 10 
                     
                     progress_bar = st.progress(0)
                     total_batches = (len(missing_list) // BATCH_SIZE) + 1
@@ -252,24 +272,28 @@ with st.expander("🔄 SINCRONIZAR DATOS", expanded=True):
                         
                         # Subir Lote inmediatamente
                         if batch_data:
-                            df_batch = pd.DataFrame(batch_data)
-                            pandas_gbq.to_gbq(
-                                df_batch, f"{DATASET_ID}.lineups", project_id=PROJECT_ID, 
-                                if_exists='append', credentials=credentials
-                            )
-                            st.write(f"   ✅ Lote {current_batch_num} subido a la nube.")
-                        
+                            try:
+                                df_batch = pd.DataFrame(batch_data)
+                                pandas_gbq.to_gbq(
+                                    df_batch, f"{DATASET_ID}.lineups", project_id=PROJECT_ID, 
+                                    if_exists='append', credentials=credentials
+                                )
+                                st.write(f"   ✅ Lote {current_batch_num} SUBIDO CORRECTAMENTE (Filas: {len(df_batch)}).")
+                            except Exception as e:
+                                st.error(f"❌ Error subiendo lote a BigQuery: {e}")
+                        else:
+                            st.warning(f"   ⚠️ El Lote {current_batch_num} no ha generado datos (¿Bloqueo de API?).")
+
                         progress_bar.progress(min((i + BATCH_SIZE) / len(missing_list), 1.0))
                     
                     st.balloons()
-                    st.success("🎉 ¡PROCESO TERMINADO! Recargando...")
+                    st.success("🎉 ¡PROCESO TERMINADO! Recargando la web...")
                     time.sleep(2)
                     st.rerun()
 
 st.divider()
 
 # --- VISOR ---
-# (Código del visor igual que antes, optimizado)
 q = f"SELECT DISTINCT GameID, Week, Location FROM `{PROJECT_ID}.{DATASET_ID}.lineups` WHERE Season = '{CURRENT_SEASON}' ORDER BY GameID DESC"
 try: df_idx = client.query(q).to_dataframe()
 except: df_idx = pd.DataFrame()
@@ -302,4 +326,4 @@ if not df_idx.empty:
     
     st.markdown(make_pretty_table(df_data), unsafe_allow_html=True)
 else:
-    st.info("Base de datos vacía. Sincroniza arriba.")
+    st.info("👆 Base de datos vacía. Dale al botón de SINCRONIZAR arriba.")
